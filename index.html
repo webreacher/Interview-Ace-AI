@@ -41,6 +41,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
+  <!-- Document parsers for PDF and DOCX resume uploads -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://unpkg.com/mammoth@1.9.0/mammoth.browser.min.js"></script>
+
   <!-- React & Babel for Single-File Execution -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -444,21 +448,37 @@
       return new Blob([buffer], { type: 'audio/wav' });
     }
 
-    function blobToBase64(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = reader.result;
-          if (typeof result === 'string') {
-            const base64 = result.split(',')[1];
-            resolve(base64);
-          } else {
-            reject(new Error("Failed to convert blob to base64"));
-          }
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
+    function resampleAudio(audio, sourceRate, targetRate = 16000) {
+      if (sourceRate === targetRate) return audio;
+
+      const sampleCount = Math.round(audio.length * targetRate / sourceRate);
+      const resampled = new Float32Array(sampleCount);
+      const ratio = sourceRate / targetRate;
+      for (let i = 0; i < sampleCount; i++) {
+        const position = i * ratio;
+        const left = Math.floor(position);
+        const right = Math.min(left + 1, audio.length - 1);
+        const fraction = position - left;
+        resampled[i] = audio[left] * (1 - fraction) + audio[right] * fraction;
+      }
+      return resampled;
+    }
+
+    function mergeTranscriptText(existing, incoming) {
+      const previousWords = existing.trim().split(/\s+/).filter(Boolean);
+      const nextWords = incoming.trim().split(/\s+/).filter(Boolean);
+      const normalize = word => word.toLowerCase().replace(/[.,!?;:]/g, "");
+      const maxOverlap = Math.min(12, previousWords.length, nextWords.length);
+
+      for (let overlap = maxOverlap; overlap > 0; overlap--) {
+        const previousTail = previousWords.slice(-overlap).map(normalize);
+        const nextHead = nextWords.slice(0, overlap).map(normalize);
+        if (previousTail.every((word, index) => word === nextHead[index])) {
+          return [...previousWords, ...nextWords.slice(overlap)].join(" ");
+        }
+      }
+
+      return [...previousWords, ...nextWords].join(" ");
     }
 
     // --- CURATED QUESTION BANK ---
@@ -510,6 +530,449 @@
       }
     ];
 
+    const RESUME_SKILL_TERMS = [
+      "JavaScript", "TypeScript", "Python", "Java", "C++", "C#", "Go", "Rust", "SQL",
+      "React", "Next.js", "Node.js", "Express", "Angular", "Vue", "HTML", "CSS",
+      "AWS", "Azure", "GCP", "Google Cloud", "Docker", "Kubernetes", "Terraform",
+      "CI/CD", "Git", "Linux", "Microservices", "Distributed Systems", "System Design",
+      "REST", "REST APIs", "GraphQL", "gRPC", "Kafka", "Redis", "PostgreSQL",
+      "MySQL", "MongoDB", "DynamoDB", "Elasticsearch", "Snowflake", "Spark",
+      "Airflow", "Machine Learning", "Deep Learning", "Generative AI", "LLM",
+      "TensorFlow", "PyTorch", "Pandas", "Agile", "Scrum", "Jest", "Cypress",
+      "Playwright", "Prometheus", "Grafana", "CI/CD", "Figma", "Product Management",
+      "Data Analysis", "Data Engineering", "Leadership", "Project Management",
+      "Quality Assurance", "Manual Testing", "Automation Testing", "Test Automation",
+      "API Testing", "Regression Testing", "Performance Testing", "Test Planning",
+      "Test Cases", "Bug Tracking", "Selenium", "Appium", "Postman", "JMeter",
+      "Jira", "Confluence", "Accessibility Testing", "Security Testing",
+      "Financial Analysis", "Financial Modeling", "Forecasting", "Budgeting",
+      "Accounting", "Auditing", "Risk Management", "Market Research", "SEO",
+      "Content Strategy", "Copywriting", "Social Media", "Salesforce", "CRM",
+      "Customer Success", "Customer Service", "Recruiting", "Talent Acquisition",
+      "Human Resources", "Payroll", "Supply Chain", "Project Management",
+      "Business Analysis", "Business Intelligence", "Power BI", "Tableau",
+      "Microsoft Excel", "Google Analytics", "Public Relations", "Graphic Design",
+      "User Research", "Wireframing", "Prototyping", "Adobe Photoshop",
+      "Adobe Illustrator", "Communication", "Negotiation", "Event Planning",
+      "Inventory Management", "Process Improvement", "Healthcare", "HIPAA",
+      "Teaching", "Curriculum Development", "Legal Research", "Contract Management",
+      "Data Visualization", "Statistical Analysis", "ETL", "Data Warehousing",
+      "Natural Language Processing", "Computer Vision", "Deep Learning",
+      "Requirements Gathering", "Stakeholder Management", "Product Strategy"
+    ];
+
+    const RESUME_STOP_WORDS = new Set([
+      "about", "above", "after", "again", "against", "also", "among", "because",
+      "been", "before", "being", "below", "between", "both", "could", "does",
+      "during", "each", "from", "further", "have", "having", "into", "itself",
+      "more", "most", "other", "over", "same", "should", "some", "such", "than",
+      "that", "their", "them", "then", "there", "these", "they", "this", "those",
+      "through", "under", "until", "very", "what", "when", "where", "which",
+      "while", "with", "would", "your", "using", "used", "work", "worked",
+      "working", "responsible", "including", "experience", "years", "year",
+      "need", "needs", "build", "building", "reliable", "improve", "improved",
+      "role", "required", "requirements", "candidate", "team", "strong", "ability",
+      "skills", "looking", "seeking", "join", "help", "support", "new", "ensure",
+      "a", "an", "the", "and", "or", "but", "if", "of", "in", "on", "at", "to",
+      "for", "by", "as", "is", "are", "was", "were", "be", "been", "being",
+      "do", "does", "did", "can", "may", "will", "must", "not", "no", "all",
+      "any", "each", "every", "its", "our", "we", "you", "who", "how", "why",
+      "what", "when", "where", "which", "while", "within", "across", "per",
+      "etc", "via", "able", "well", "related", "relevant", "various", "multiple",
+      "including", "include", "includes", "preferred", "preferably", "plus",
+      "minimum", "qualification", "qualifications", "responsibility", "responsibilities",
+      "description", "overview", "opportunity", "position", "work", "working",
+      "company", "organization", "business", "environment", "excellent", "good",
+      "great", "ideal", "must-have", "nice-to-have"
+    ]);
+
+    const RESUME_ACTION_VERBS = new Set([
+      "accelerated", "automated", "built", " launched", "created", "delivered",
+      "designed", "developed", "drove", "implemented", "improved", "increased",
+      "led", "launched", "optimized", "reduced", "resolved", "scaled", "shipped",
+      "streamlined", "engineered", "established", "deployed", "mentored", "owned"
+    ].map(verb => verb.trim()));
+
+    function normalizeResumeText(text) {
+      return text.toLowerCase().replace(/[^a-z0-9+#.]+/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function resumeContainsTerm(normalizedText, term) {
+      const normalizedTerm = normalizeResumeText(term);
+      if (!normalizedTerm) return false;
+      const escapedTerm = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(^|[^a-z0-9+#])${escapedTerm}(?=$|[^a-z0-9+#])`, "i").test(normalizedText);
+    }
+
+    function extractResumeTerms(text) {
+      const normalized = normalizeResumeText(text);
+      const phrases = RESUME_SKILL_TERMS.filter(skill => resumeContainsTerm(normalized, skill));
+      const words = normalized.split(" ").filter(word =>
+        word.length > 2 && !RESUME_STOP_WORDS.has(word) && !/^\d+$/.test(word)
+      );
+      return [...new Set([...phrases, ...words])];
+    }
+
+    function detectResumeRole(text) {
+      const normalizedText = normalizeResumeText(text);
+      const roleTerms = [
+        { role: "QA Automation", terms: ["QA Automation", "Test Automation", "Automation Testing", "Automation Tester", "SDET", "Software Development Engineer in Test"] },
+        { role: "Quality Assurance", terms: ["Quality Assurance", "QA Analyst", "QA Engineer", "Quality Engineer", "Software Tester", "Manual Testing", "QA"] },
+        { role: "Software Engineering", terms: ["Software Engineer", "Software Engineering"] },
+        { role: "Data Engineering", terms: ["Data Engineer", "Data Engineering"] },
+        { role: "Product Management", terms: ["Product Manager", "Product Management"] },
+        { role: "Frontend Engineering", terms: ["Frontend Engineer", "Frontend Developer"] },
+        { role: "Backend Engineering", terms: ["Backend Engineer", "Backend Developer"] },
+        { role: "Full Stack Engineering", terms: ["Full Stack Engineer", "Full Stack Developer"] },
+        { role: "DevOps Engineering", terms: ["DevOps Engineer", "DevOps"] },
+        { role: "Machine Learning Engineering", terms: ["Machine Learning Engineer"] },
+        { role: "Data Analysis", terms: ["Data Analyst"] },
+        { role: "UX Design", terms: ["UX Designer"] },
+        { role: "Engineering Management", terms: ["Engineering Manager"] },
+        { role: "Business Analysis", terms: ["Business Analyst"] },
+        { role: "Project Management", terms: ["Project Manager"] },
+        { role: "Cybersecurity", terms: ["Cybersecurity", "Information Security", "Security Analyst", "Security Engineer"] },
+        { role: "Human Resources", terms: ["Human Resources", "HR Manager", "Recruiter", "Talent Acquisition"] },
+        { role: "Marketing", terms: ["Marketing Manager", "Digital Marketing", "Marketing Specialist"] },
+        { role: "Sales", terms: ["Sales Manager", "Sales Representative", "Account Executive"] },
+        { role: "Customer Support", terms: ["Customer Support", "Customer Service", "Support Specialist"] },
+        { role: "Finance", terms: ["Financial Analyst", "Finance Manager", "Accountant"] },
+        { role: "Operations", terms: ["Operations Manager", "Operations Analyst"] },
+        { role: "Content Writing", terms: ["Content Writer", "Technical Writer", "Copywriter"] },
+        { role: "Graphic Design", terms: ["Graphic Designer", "Visual Designer"] }
+      ];
+
+      const titleEnding = "(?:analyst|architect|administrator|artist|accountant|assistant|auditor|chef|consultant|coordinator|designer|developer|director|editor|engineer|illustrator|instructor|lawyer|mechanic|manager|nurse|officer|operator|pharmacist|planner|producer|professor|recruiter|representative|salesperson|scientist|specialist|strategist|teacher|technician|therapist|trainer|writer|executive|controller|inspector)";
+      const titlePattern = new RegExp(`\\b((?:[a-z][a-z&./+-]*\\s+){0,4}${titleEnding})\\b`, "i");
+      const roleCues = /(?:job title|position|role|hiring|seeking|looking for|join us as)\s*[:,-]?\s*(?:an?\s+)?([^\n.;]{3,100})/i;
+      const cueMatch = text.match(roleCues);
+      const titleLine = text.split(/\r?\n/).map(line => line.trim()).find(line =>
+        line.length <= 100 && titlePattern.test(line)
+      );
+      const titleMatch = [cueMatch?.[1], titleLine, text]
+        .filter(Boolean)
+        .map(candidate => candidate.match(titlePattern))
+        .find(Boolean);
+      if (titleMatch) {
+        const title = titleMatch[1]
+          .replace(/^(?:(?:a|an|the|for|to|is|our|highly|passionate|experienced|motivated|qualified|talented|skilled|dynamic|dedicated|senior-level|junior-level)\s+)+/i, "")
+          .trim()
+          .replace(/\b[a-z]/g, character => character.toUpperCase());
+        return title.replace(/\bQa\b/g, "QA").replace(/\bUx\b/g, "UX").replace(/\bHr\b/g, "HR");
+      }
+
+      const knownRole = roleTerms.find(({ terms }) =>
+        terms.some(term => resumeContainsTerm(normalizedText, term))
+      )?.role;
+      if (knownRole) return knownRole;
+      return null;
+    }
+
+    function analyzeResumeLocally(resume, jobDescription, fallbackRole) {
+      const text = resume.trim();
+      const normalizedResume = normalizeResumeText(text);
+      const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const resumeTerms = extractResumeTerms(text);
+      const normalizedJobDescription = normalizeResumeText(jobDescription);
+      const jobSkillPhrases = jobDescription.trim()
+        ? RESUME_SKILL_TERMS.filter(skill => resumeContainsTerm(normalizedJobDescription, skill))
+        : [];
+      const jobSkillWords = new Set(jobSkillPhrases.flatMap(skill => normalizeResumeText(skill).split(" ")));
+      const jobWords = jobDescription.trim()
+        ? normalizedJobDescription.split(" ")
+          .map(word => word.replace(/^[^a-z0-9+#]+|[^a-z0-9+#]+$/gi, ""))
+          .filter(word =>
+            word.length > 2 &&
+            !RESUME_STOP_WORDS.has(word) &&
+            !jobSkillWords.has(word) &&
+            !/^\d+$/.test(word)
+          )
+        : [];
+      const jobTerms = [...new Set([...jobSkillPhrases, ...jobWords])];
+      const matchedTerms = jobTerms.filter(term => {
+        return resumeContainsTerm(normalizedResume, term);
+      });
+      const missingKeywords = (jobTerms.length
+        ? jobTerms.filter(term => !matchedTerms.includes(term))
+        : [])
+        .slice(0, 8);
+
+      const bulletLines = lines.filter(line => /^[-*•▪]\s+/.test(line));
+      const evidenceLines = (bulletLines.length ? bulletLines : lines)
+        .filter(line => line.length > 45 && !/^(education|experience|skills|projects|summary|certifications)\b/i.test(line));
+      const actionVerbCount = evidenceLines.filter(line =>
+        RESUME_ACTION_VERBS.has((line.replace(/^[-*•▪]\s*/, "").match(/[a-z]+/i) || [""])[0].toLowerCase())
+      ).length;
+      const bulletQuality = evidenceLines.length
+        ? Math.min(100, Math.round(35 + (actionVerbCount / evidenceLines.length) * 65))
+        : 35;
+      const quantifiedLines = evidenceLines.filter(line =>
+        /(?:\b\d+(?:[.,]\d+)?\s*(?:%|percent(?:age)?|x|k|m|b|ms|seconds?|minutes?|hours?|users?|requests?|rps|qps|million|billion)\b|\$\s?\d|\b\d{4}\b)/i.test(line)
+      ).length;
+      const quantifiableImpact = evidenceLines.length
+        ? Math.min(100, Math.round(30 + (quantifiedLines / evidenceLines.length) * 70))
+        : 30;
+      const sectionCount = (text.match(/^\s*(?:summary|profile|experience|work history|education|skills|projects|certifications|achievements)\s*:?/gim) || []).length;
+      const wordCount = text.split(/\s+/).filter(Boolean).length;
+      const readability = Math.max(20, Math.min(100,
+        45 + Math.min(sectionCount, 5) * 7 +
+        (wordCount >= 100 && wordCount <= 1200 ? 20 : wordCount > 40 ? 10 : 0) +
+        (/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/i.test(text) ? 5 : 0)
+      ));
+      const keywordMatch = jobTerms.length
+        ? Math.round((matchedTerms.length / jobTerms.length) * 100)
+        : Math.min(95, 40 + resumeTerms.filter(term =>
+          RESUME_SKILL_TERMS.includes(term)
+        ).length * 5);
+      const atsScore = Math.round(
+        keywordMatch * 0.55 + quantifiableImpact * 0.15 + readability * 0.15 + bulletQuality * 0.15
+      );
+
+      const candidateName = lines.find(line =>
+        line.length <= 60 &&
+        !/@|https?:|linkedin|github|resume|curriculum vitae/i.test(line) &&
+        !/^(summary|profile|experience|education|skills|projects|certifications)\b/i.test(line)
+      ) || "Candidate Profile";
+      const detectedRole = detectResumeRole(jobDescription) || detectResumeRole(text) || fallbackRole;
+      const topSkills = RESUME_SKILL_TERMS.filter(skill =>
+        resumeContainsTerm(normalizedResume, skill)
+      ).slice(0, 10);
+      const projectsFound = evidenceLines
+        .filter(line => /\b(built|developed|designed|implemented|created|led|launched|engineered|deployed|scaled)\b/i.test(line))
+        .slice(0, 3)
+        .map(line => line.replace(/^[-*•▪]\s*/, ""));
+      const claim = projectsFound[0] || evidenceLines[0] || lines.find(line => line.length > 35) || text.slice(0, 180);
+      const shortClaim = claim.length > 180 ? `${claim.slice(0, 177)}...` : claim;
+      const atsRecommendations = [];
+
+      if (!jobTerms.length) {
+        atsRecommendations.push("Paste a target job description for a direct, role-specific keyword match score.");
+      }
+      if (missingKeywords.length) {
+        atsRecommendations.push(`If accurate, add relevant job-description terms: ${missingKeywords.slice(0, 4).join(", ")}.`);
+      }
+      if (quantifiableImpact < 70) {
+        atsRecommendations.push("Add measurable outcomes to experience bullets, such as scale, time saved, cost reduced, or reliability improved.");
+      }
+      if (bulletQuality < 70) {
+        atsRecommendations.push("Start each experience bullet with a specific action verb and state the result you delivered.");
+      }
+      if (sectionCount < 3) {
+        atsRecommendations.push("Use clearly labeled sections for experience, skills, education, and projects to improve ATS readability.");
+      }
+      if (!atsRecommendations.length) {
+        atsRecommendations.push("Keep the resume tailored to the role and verify that every listed skill is supported by a concrete example.");
+      }
+
+      const focus = missingKeywords.length
+        ? missingKeywords.slice(0, 3).join(", ")
+        : `${detectedRole} interview fundamentals`;
+      const roadmap = [
+        { week: "Week 1", title: "Close the highest-priority skill gaps", desc: `Review the role requirements and build evidence for: ${focus}.`, drills: missingKeywords.slice(0, 3).length ? missingKeywords.slice(0, 3) : topSkills.slice(0, 3), status: "Start here", color: "border-blue-500/40 bg-blue-50/30 dark:bg-blue-950/20" },
+        { week: "Week 2", title: "Strengthen measurable impact", desc: "Turn project work into concise results with scale, baseline, and measurable outcomes.", drills: ["Quantify project outcomes", "Explain the baseline and trade-offs", "Practice a concise project walkthrough"], status: "Build evidence", color: "border-indigo-500/40 bg-indigo-50/30 dark:bg-indigo-950/20" },
+        { week: "Week 3", title: "Prepare experience-based stories", desc: `Rehearse clear explanations of your real work, starting with: ${shortClaim}`, drills: ["Situation and constraints", "Your decisions and alternatives", "Results and lessons learned"], status: "Practice stories", color: "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900" },
+        { week: "Week 4", title: "Run tailored interview drills", desc: "Practice role-specific technical and behavioral questions, then refine answers using feedback.", drills: ["Technical deep dive", "Behavioral STAR answer", "Final timed mock interview"], status: "Mock interview", color: "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900" }
+      ];
+      const tailoredQuestions = [
+        { stage: "Resume Project Deep Dive", title: "Walk me through this project and your contribution", description: `Your resume says: "${shortClaim}" What was the problem, what did you personally build, and how did you measure success?`, criteria: "Clear ownership, design choices, and measurable results." },
+        { stage: "Technical Trade-offs", title: `Technical decisions in your ${detectedRole} work`, description: `Which tools or approaches from your resume were most important to "${(topSkills.slice(0, 3).join(", ") || detectedRole)}", and what alternatives did you consider?`, criteria: "Technical depth, alternatives, constraints, and trade-offs." },
+        { stage: "Impact & Metrics", title: "Quantify the impact of your work", description: `For "${shortClaim}", what changed before and after your work? Which scale, latency, quality, cost, or reliability metrics did you track?`, criteria: "Credible baseline, metric, timeframe, and outcome." },
+        { stage: "Problem Solving", title: "Describe a difficult obstacle on this project", description: `What was the hardest failure or bottleneck you encountered while delivering "${shortClaim}", and how did you diagnose and resolve it?`, criteria: "Structured troubleshooting, ownership, and lessons learned." },
+        { stage: "Role & Growth", title: `How does your experience prepare you for ${detectedRole}?`, description: `Which experience on your resume best matches this target role, and what would you improve if you repeated that work?`, criteria: "Relevant experience, self-awareness, and role alignment." }
+      ];
+
+      return {
+        candidateName,
+        detectedRole,
+        atsScore,
+        atsBreakdown: { keywordMatch, quantifiableImpact, readability, bulletQuality },
+        topSkills,
+        projectsFound,
+        missingKeywords,
+        atsRecommendations,
+        roadmap,
+        tailoredQuestions,
+        analysisNote: jobTerms.length
+          ? `Compared against ${jobTerms.length} keywords extracted from your job description.`
+          : "No job description provided; keyword score reflects skills detected in your resume. Add a target JD for a direct match score."
+      };
+    }
+
+    function evaluateAnswerLocally(question, answer, role, track) {
+      const cleanAnswer = answer.trim();
+      const normalizedAnswer = cleanAnswer.toLowerCase();
+      const words = normalizedAnswer.match(/[a-z0-9+#]+/g) || [];
+      const wordCount = words.length;
+      const fillerWordCount = (cleanAnswer.match(/\b(um|uh|like|you know|basically|actually)\b/gi) || []).length;
+      const ignoredTerms = new Set(
+        "about after again align also answer any are because before being between both brief build building can candidate clear could describe did discuss does during each explain feel first for from give goal goals going have help here how into its just key long make me most much must need our out overall personally question role should show tell than that the their then there these they thing this through to toward use using walk want was were what when where which while why will with would your".split(" ")
+      );
+      const answerTerms = new Set([
+        ...words,
+        ...(normalizedAnswer.match(/[a-z0-9+#]+(?:-[a-z0-9+#]+)+/g) || [])
+      ]);
+      const getTerms = text => [...new Set(
+        (text || "").toLowerCase().match(/[a-z][a-z0-9+#.-]{3,}/g)?.filter(term => !ignoredTerms.has(term)) || []
+      )];
+      const aliases = {
+        architecture: ["architectural", "design"],
+        architectural: ["architecture", "design"],
+        design: ["architecture", "architectural"],
+        failure: ["fail", "failing", "failed"],
+        failover: ["failure", "failed"],
+        reliability: ["reliable", "reliability"],
+        reliable: ["reliability"],
+        consistency: ["consistent"],
+        consistent: ["consistency"],
+        scalability: ["scale", "scaling", "scalable"],
+        scalable: ["scale", "scaling", "scalability"],
+        tradeoffs: ["tradeoff", "trade-offs"],
+        "trade-offs": ["tradeoff", "tradeoffs"],
+        metrics: ["metric", "measure", "measured"],
+        measurable: ["measure", "measured", "metric", "metrics"],
+        results: ["result", "outcome", "impact"],
+        outcome: ["result", "results", "impact"],
+        actions: ["action", "acted", "implemented", "led"],
+        action: ["actions", "acted", "implemented", "led"],
+        constraints: ["constraint", "limitation", "limited"],
+        latency: ["p99", "response"],
+        throughput: ["rps", "requests", "volume"],
+        communication: ["communicated", "stakeholder", "stakeholders"],
+        motivation: ["motivated", "interest", "excited"],
+        conflict: ["disagreement", "dispute", "resolved"],
+        questions: ["ask", "asking", "asked"],
+        curiosity: ["ask", "asking", "learn"],
+        insightfulness: ["insightful", "ask", "asking"],
+        interest: ["interested", "excited", "motivation"],
+        alignment: ["align", "aligned", "fit"],
+        company: ["team", "organization", "employer"],
+        deadline: ["time", "schedule", "delivery"],
+        task: ["responsibility", "owned", "goal"],
+        situation: ["context", "challenge", "problem"],
+        result: ["results", "outcome", "impact"]
+      };
+      const matches = terms => terms.filter(term =>
+        answerTerms.has(term) || (aliases[term] || []).some(alias => answerTerms.has(alias))
+      );
+      const titleTerms = getTerms(question?.title);
+      const criteriaTerms = getTerms(question?.criteria);
+      const descriptionTerms = getTerms(question?.description);
+      const uniqueExpectedTerms = [...new Set([...titleTerms, ...criteriaTerms, ...descriptionTerms])];
+      const matchedTerms = [...new Set([
+        ...matches(titleTerms),
+        ...matches(criteriaTerms),
+        ...matches(descriptionTerms)
+      ])];
+      const relevanceScore = uniqueExpectedTerms.length
+        ? Math.min(100, matchedTerms.length * 10)
+        : (wordCount >= 20 ? 50 : 20);
+      const sentences = cleanAnswer.split(/[.!?]+/).filter(sentence => sentence.trim().length > 0);
+      const hasSpecificEvidence = /\b\d+(?:[.,]\d+)?%?\b/.test(cleanAnswer)
+        || /\b(built|designed|implemented|measured|reduced|increased|improved|shipped|led|resolved|tested|deployed|migrated|launched)\b/i.test(cleanAnswer);
+      const hasReasoning = /\b(because|therefore|so that|which meant|trade[- ]?off|alternative|instead|however|result(?:ed)? in)\b/i.test(cleanAnswer);
+      const hasSequence = /\b(first|then|next|finally|after that|as a result|situation|task|action|result)\b/i.test(cleanAnswer);
+      const evidenceScore = Math.min(100,
+        (hasSpecificEvidence ? 45 : 0) +
+        (hasReasoning ? 30 : 0) +
+        (wordCount >= 35 ? 25 : wordCount >= 18 ? 15 : 0)
+      );
+      const technicalScore = Math.round(relevanceScore * 0.7 + evidenceScore * 0.3);
+      const structureScore = Math.min(100,
+        15 +
+        (sentences.length >= 2 ? 20 : 0) +
+        (sentences.length >= 4 ? 15 : 0) +
+        (hasSequence ? 25 : 0) +
+        (hasReasoning ? 15 : 0) +
+        (/\b(situation|task|action|result)\b/i.test(cleanAnswer) ? 10 : 0)
+      );
+      const deliveryScore = Math.max(10, Math.min(100,
+        (wordCount < 8 ? 15 : wordCount < 20 ? 35 : wordCount < 45 ? 60 : wordCount <= 180 ? 82 : 65) -
+        Math.min(24, fillerWordCount * 6) +
+        (sentences.length > 0 && sentences.length <= Math.ceil(wordCount / 8) ? 8 : 0)
+      ));
+      let overallScore = Math.round(technicalScore * 0.55 + structureScore * 0.25 + deliveryScore * 0.2);
+      if (relevanceScore < 20) overallScore = Math.min(overallScore, 25);
+      else if (relevanceScore < 40) overallScore = Math.min(overallScore, 44);
+      else if (relevanceScore < 60) overallScore = Math.min(overallScore, 64);
+      if (wordCount < 8) overallScore = Math.min(overallScore, 15);
+
+      const strengths = [];
+      if (relevanceScore >= 60) strengths.push("Addressed several of the question's key requirements.");
+      if (hasSpecificEvidence) strengths.push("Included a concrete action, example, or measurable detail.");
+      if (hasReasoning) strengths.push("Explained reasoning or a decision trade-off.");
+      if (hasSequence) strengths.push("Used clear sequencing to organize the response.");
+      if (!strengths.length) strengths.push("The response was captured and can be improved with a direct, evidence-based answer.");
+
+      const improvements = [];
+      if (relevanceScore < 60) {
+        const missingTerms = [...criteriaTerms, ...descriptionTerms, ...titleTerms]
+          .filter(term => !matchedTerms.includes(term))
+          .filter((term, index, terms) => terms.indexOf(term) === index)
+          .slice(0, 4);
+        improvements.push(missingTerms.length
+          ? `Address the question more directly; cover relevant points such as ${missingTerms.join(", ")}.`
+          : "Address the question directly before adding background detail.");
+      }
+      if (!hasSpecificEvidence) improvements.push("Add a specific example, your personal action, and a measurable outcome where possible.");
+      if (!hasReasoning) improvements.push("Explain why you chose that approach and mention a trade-off or alternative.");
+      if (!hasSequence) improvements.push("Organize the answer into a clear sequence: context, action, and result.");
+      if (wordCount < 20) improvements.push("Develop the answer with enough detail to show your reasoning and contribution.");
+      if (fillerWordCount > 2) improvements.push(`Reduce filler words; ${fillerWordCount} were detected in the transcript.`);
+
+      const hiringRecommendation = overallScore >= 85
+        ? "Strong Hire"
+        : overallScore >= 70
+        ? "Hire"
+        : overallScore >= 50
+        ? "Lean Hire"
+        : "Do Not Hire";
+      const summary = relevanceScore < 20
+        ? `This response did not contain clear evidence addressing the question about ${question?.title || role}; the score reflects the lack of relevant content.`
+        : `This response included evidence for ${matchedTerms.length} relevant signals and scored ${overallScore}/100. ${overallScore < 50 ? "It needs a more direct, specific answer." : "The feedback below highlights the strongest evidence and next improvements."}`;
+
+      return {
+        overallScore,
+        hiringRecommendation,
+        technicalScore,
+        structureScore,
+        deliveryScore,
+        summary,
+        strengths,
+        improvements,
+        modelAnswer: `A strong answer should directly address: "${question?.title || "the interview question"}". Explain the relevant context, your specific actions and reasoning, then the outcome and what you learned. Use accurate details from your own experience; do not claim results or technical choices you cannot support.`,
+        fillerWordCount,
+        matchedTerms,
+        relevanceScore,
+        wordCount
+      };
+    }
+
+    function aggregateInterviewFeedback(history) {
+      const average = key => Math.round(history.reduce((total, item) => total + item.feedback[key], 0) / history.length);
+      const overallScore = average("overallScore");
+      const recommendations = history.map(item => item.feedback.hiringRecommendation);
+      const hiringRecommendation = overallScore >= 85
+        ? "Strong Hire"
+        : overallScore >= 70
+        ? "Hire"
+        : overallScore >= 50
+        ? "Lean Hire"
+        : "Do Not Hire";
+      const weakest = [...history].sort((a, b) => a.feedback.overallScore - b.feedback.overallScore)[0];
+      return {
+        overallScore,
+        hiringRecommendation,
+        technicalScore: average("technicalScore"),
+        structureScore: average("structureScore"),
+        deliveryScore: average("deliveryScore"),
+        summary: `Final review based on ${history.length} evaluated ${history.length === 1 ? "answer" : "answers"}: average score ${overallScore}/100. ${recommendations.filter(item => item === "Do Not Hire").length} answer(s) received a Do Not Hire rating. The area to revisit first is "${weakest.question}".`,
+        strengths: [...new Set(history.flatMap(item => item.feedback.strengths))].slice(0, 4),
+        improvements: [...new Set(history.flatMap(item => item.feedback.improvements))].slice(0, 4),
+        modelAnswer: "Review the per-question results below. Use the feedback to prepare accurate examples that directly address each question, explain your decisions, and state measurable outcomes.",
+        fillerWordCount: history.reduce((total, item) => total + item.feedback.fillerWordCount, 0)
+      };
+    }
+
     // --- MAIN APP COMPONENT ---
     function App() {
       // Views: 'home' (Hero reference), 'simulator', 'resume', 'roadmap', 'setup', 'bank', 'history', 'report'
@@ -525,6 +988,8 @@
 
       // Resume State & ATS scoring
       const [resumeText, setResumeText] = useState("");
+      const [resumeFileName, setResumeFileName] = useState("");
+      const [resumeNotice, setResumeNotice] = useState(null);
       const [resumeParsed, setResumeParsed] = useState(null);
       const [isAnalyzingResume, setIsAnalyzingResume] = useState(false);
       const [resumeQuestions, setResumeQuestions] = useState([]);
@@ -547,7 +1012,7 @@
 
       // STT State & Audio Levels
       const [isRecording, setIsRecording] = useState(false);
-      const [isTranscribingWithAI, setIsTranscribingWithAI] = useState(false);
+      const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
       const [audioLevel, setAudioLevel] = useState(0);
 
       // Interview Session State
@@ -556,6 +1021,7 @@
       const [userResponse, setUserResponse] = useState("");
       const [transcriptHistory, setTranscriptHistory] = useState([]);
       const [cameraActive, setCameraActive] = useState(true);
+      const [cameraNotice, setCameraNotice] = useState(null);
       const [timerSeconds, setTimerSeconds] = useState(180);
       const [isTimerRunning, setIsTimerRunning] = useState(false);
       const [isAIEvaluating, setIsAIEvaluating] = useState(false);
@@ -563,6 +1029,7 @@
 
       // Scorecard / Feedback State
       const [latestFeedback, setLatestFeedback] = useState(null);
+      const [isFinalReview, setIsFinalReview] = useState(false);
       const [savedSessions, setSavedSessions] = useState([
         {
           id: "sess-101",
@@ -590,14 +1057,20 @@
       const currentUtteranceRef = useRef(null);
 
       // Audio capture & STT references
-      const mediaRecorderRef = useRef(null);
-      const audioChunksRef = useRef([]);
       const audioStreamRef = useRef(null);
       const audioContextRef = useRef(null);
       const analyserRef = useRef(null);
+      const speechProcessorRef = useRef(null);
+      const speechPipelineRef = useRef(null);
+      const speechPipelinePromiseRef = useRef(null);
+      const speechAudioChunksRef = useRef([]);
+      const speechAudioLengthRef = useRef(0);
+      const speechQueueRef = useRef(Promise.resolve());
+      const speechSessionRef = useRef(0);
+      const isStartingSpeechRef = useRef(false);
       const animFrameRef = useRef(null);
-      const recognitionRef = useRef(null);
       const baseResponseRef = useRef("");
+      const finalTranscriptRef = useRef("");
       const isListeningRef = useRef(false);
 
       // Synchronize theme with HTML document tag
@@ -609,13 +1082,20 @@
         }
       }, [isDarkMode]);
 
+      const resetInterviewReview = () => {
+        setTranscriptHistory([]);
+        setLatestFeedback(null);
+        setIsFinalReview(false);
+        setUserResponse("");
+        setInstantFeedback(null);
+      };
+
       // Direct mock interview track launcher (Opens simulator directly with preconfigured track)
       const startMockInterviewWithTrack = (trackName) => {
         setSelectedTrack(trackName);
         setUseResumeQuestions(false);
         setSessionStage(0);
-        setUserResponse("");
-        setInstantFeedback(null);
+        resetInterviewReview();
 
         if (trackName === "HR") {
           setActiveQuestion({
@@ -667,197 +1147,98 @@
         return () => clearInterval(interval);
       }, [currentView, isRecording]);
 
-      // File upload for resume
-      const handleFileUpload = (e) => {
-        const file = e.target.files?.[0];
+      // Extract readable text from supported resume formats.
+      const handleFileUpload = async (e) => {
+        const input = e.target;
+        const file = input.files?.[0];
+        input.value = "";
         if (!file) return;
 
-        if (file.type === "text/plain" || file.name.endsWith(".txt") || file.name.endsWith(".md")) {
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            setResumeText(event.target.result || "");
-          };
-          reader.readAsText(file);
-        } else {
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            const raw = event.target.result;
-            if (typeof raw === 'string') {
-              const cleaned = raw.replace(/[^\x20-\x7E\t\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
-              setResumeText(cleaned.slice(0, 5000));
+        setResumeNotice(null);
+        setResumeText("");
+        setResumeFileName(file.name);
+        setResumeParsed(null);
+        setResumeQuestions([]);
+        setUseResumeQuestions(false);
+
+        if (file.size > 10 * 1024 * 1024) {
+          setResumeNotice({ type: "warning", text: "Choose a resume smaller than 10 MB." });
+          return;
+        }
+
+        const extension = file.name.split(".").pop()?.toLowerCase();
+        try {
+          let extractedText = "";
+          if (extension === "txt" || extension === "md") {
+            extractedText = await file.text();
+          } else if (extension === "pdf") {
+            if (!window.pdfjsLib) throw new Error("The PDF reader could not be loaded. Check your internet connection and reload the page.");
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+              "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+            const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+            const pages = [];
+            for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+              const page = await pdf.getPage(pageNumber);
+              const content = await page.getTextContent();
+              pages.push(content.items.map(item => `${item.str || ""}${item.hasEOL ? "\n" : " "}`).join("").trim());
             }
-          };
-          reader.readAsText(file);
+            extractedText = pages.join("\n");
+          } else if (extension === "docx") {
+            if (!window.mammoth) throw new Error("The DOCX reader could not be loaded. Check your internet connection and reload the page.");
+            const result = await window.mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+            extractedText = result.value;
+          } else if (extension === "doc") {
+            throw new Error("Legacy .doc files are not supported. Save the document as PDF, DOCX, or TXT and upload it again.");
+          } else {
+            throw new Error("Unsupported file type. Upload a PDF, DOCX, TXT, or Markdown resume.");
+          }
+
+          extractedText = extractedText
+            .replace(/\u0000/g, "")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+          if (extractedText.length < 30) {
+            throw new Error("No readable text was found. If this is a scanned/image-only PDF, run OCR first and upload a text-based PDF.");
+          }
+
+          setResumeText(extractedText);
+          setResumeFileName(file.name);
+          setResumeNotice({
+            type: "success",
+            text: `Extracted ${extractedText.split(/\s+/).filter(Boolean).length} words from ${file.name}. Review the text, then calculate your ATS score.`
+          });
+        } catch (error) {
+          console.warn("Resume upload failed:", error);
+          setResumeFileName("");
+          setResumeNotice({ type: "warning", text: error.message || "Could not read this resume file." });
         }
       };
 
-      // Full ATS Resume Scoring & Personalized Question Generation
-      const analyzeResumeWithGemini = async () => {
-        if (!resumeText.trim()) return;
+      // Calculate ATS results and generate drills directly from the resume and target job description.
+      const analyzeResume = async () => {
+        if (!resumeText.trim()) {
+          setResumeNotice({ type: "warning", text: "Upload or paste readable resume text before calculating the ATS score." });
+          return;
+        }
+
         setIsAnalyzingResume(true);
-        setSpeechNotice(null);
-
-        const prompt = `You are a Principal Engineering Recruiter and Executive Bar Raiser.
-Perform a dual task on this candidate's resume:
-1. ATS Resume Grading:
-   - Calculate ATS Match Score (0-100).
-   - Category breakdowns: Keyword Match (0-100), Quantifiable Impact (0-100), Formatting & Readability (0-100), Bullet Point Quality (0-100).
-   - Top 3 missing or recommended high-signal keywords.
-   - 3 actionable bullet improvements.
-2. 5 High-Stakes Tailored Interview Questions:
-   - Deep questions interrogating specific claims, scale metrics, architecture trade-offs, and failure recovery based on their resume text.
-3. 4-Week Personalized Study Roadmap:
-   - Week 1, Week 2, Week 3, Week 4 milestones tailored to their gaps.
-
-Resume:
-"""
-${resumeText.slice(0, 4500)}
-"""
-
-Return ONLY a JSON object:
-{
-  "candidateName": "string",
-  "detectedRole": "string",
-  "atsScore": number,
-  "atsBreakdown": {
-    "keywordMatch": number,
-    "quantifiableImpact": number,
-    "readability": number,
-    "bulletQuality": number
-  },
-  "topSkills": ["skill1", "skill2", "skill3", "skill4"],
-  "projectsFound": ["project1", "project2"],
-  "missingKeywords": ["keyword1", "keyword2", "keyword3"],
-  "atsRecommendations": ["tip 1", "tip 2", "tip 3"],
-  "roadmap": [
-    { "week": "Week 1", "title": "System Design Fundamentals", "focus": "Deep dive into Raft, distributed caching, and CAP" },
-    { "week": "Week 2", "title": "Metrics & Latency Budgets", "focus": "Quantifying throughput, p99 SLAs, and failure domains" },
-    { "week": "Week 3", "title": "STAR Behavioral Framing", "focus": "Reframing leadership conflicts and ambiguous scope" },
-    { "week": "Week 4", "title": "Live Mock Drills", "focus": "Timed simulations under pressure with real-time TTS/STT" }
-  ],
-  "tailoredQuestions": [
-    {
-      "stage": "Resume Architecture Probe",
-      "title": "Deep-Dive into Primary Architecture on your Resume",
-      "description": "Looking at your most recent role, walk me through the hardest architectural challenge you solved. What were the latency requirements and design tradeoffs?",
-      "criteria": "Quantified throughput, SLA/SLO boundaries, and decoupling strategy."
-    },
-    {
-      "stage": "Technical Trade-offs",
-      "title": "Why this Specific Tech Stack Choice?",
-      "description": "On your resume you list specific databases and frameworks. Why did your team select these over competing alternatives, and what pain points emerged?",
-      "criteria": "Understanding alternative technologies and failure modes."
-    },
-    {
-      "stage": "Scale & Bottlenecks",
-      "title": "Concurrency & High-Throughput Drilldown",
-      "description": "Explain how your system sustained high loads or spikes. Where was the primary bottleneck and how did you measure p99 performance?",
-      "criteria": "System metrics, tracing, and recovery."
-    },
-    {
-      "stage": "Behavioral STAR Question",
-      "title": "Aligning Product & Engineering Priorities",
-      "description": "Share a time when product deadlines clashed with technical debt or scalability. How did you negotiate scope?",
-      "criteria": "STAR methodology, conflict resolution, leadership."
-    },
-    {
-      "stage": "Architectural Retrospective",
-      "title": "What Would You Rebuild Differently?",
-      "description": "Looking back at the flagship project on your resume, if you had today's resources and constraints, what would you re-architect?",
-      "criteria": "Vision, humility, continuous learning."
-    }
-  ]
-}`;
-
+        setResumeNotice(null);
         try {
-          const apiKey = "";
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-          const response = await fetch(apiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: "application/json" }
-            })
-          });
-
-          const data = await response.json();
-          const parsed = JSON.parse(data.candidates[0].content.parts[0].text);
+          const parsed = analyzeResumeLocally(resumeText, jobDescription, role);
           setResumeParsed(parsed);
-          setResumeQuestions(parsed.tailoredQuestions || []);
+          setResumeQuestions(parsed.tailoredQuestions);
           setUseResumeQuestions(true);
           setSessionStage(0);
+          resetInterviewReview();
           setActiveQuestion(parsed.tailoredQuestions[0]);
-
-          setSpeechNotice({
+          setResumeNotice({
             type: "success",
-            text: `Resume scored! ATS Grade: ${parsed.atsScore}/100. Tailored interview drills generated.`
+            text: `ATS analysis complete: ${parsed.atsScore}/100. ${parsed.analysisNote}`
           });
-          setTimeout(() => setSpeechNotice(null), 5000);
-        } catch (err) {
-          console.warn("Resume parsing fallback:", err);
-          const fallback = {
-            candidateName: "Senior Candidate",
-            detectedRole: role,
-            atsScore: 84,
-            atsBreakdown: {
-              keywordMatch: 86,
-              quantifiableImpact: 78,
-              readability: 90,
-              bulletQuality: 82
-            },
-            topSkills: ["Distributed Systems", "Cloud Architecture", "System Resiliency", "APIs"],
-            projectsFound: ["Core Backend Platform", "Microservices Pipeline"],
-            missingKeywords: ["p99 Latency SLA", "Idempotency", "Chaos Engineering"],
-            atsRecommendations: [
-              "Add quantified outcomes in bullet points (e.g., 'reduced AWS cost by 24%' or 'scaled to 65k RPS').",
-              "Include distributed tracing or observability frameworks explicitly (e.g., OpenTelemetry, Prometheus).",
-              "Strengthen action verbs at the beginning of each project accomplishment."
-            ],
-            roadmap: [
-              { week: "Week 1", title: "System Architecture & Foundations", focus: "Low-latency streaming, partitioning & Raft consensus" },
-              { week: "Week 2", title: "Scale & SLA Trade-offs", focus: "Mitigating thundering herd & circuit breakers" },
-              { week: "Week 3", title: "STAR Executive Communication", focus: "Framing technical roadblocks without hand-waving" },
-              { week: "Week 4", title: "Final Live AI Mock Simulations", focus: "Voice pacing, eye contact, and rapid problem decomposition" }
-            ],
-            tailoredQuestions: [
-              {
-                stage: "Resume Architecture Probe",
-                title: "Deep-Dive into Primary Architecture on your Resume",
-                description: "Looking at your most recent role, walk me through the hardest architectural challenge you solved. What were the latency requirements and design tradeoffs?",
-                criteria: "Quantified throughput, SLA/SLO boundaries, and decoupling strategy."
-              },
-              {
-                stage: "Technology Selection Justification",
-                title: "Why this Specific Tech Stack Choice?",
-                description: "On your resume you list specific databases and frameworks. Why did your team select these over competing alternatives, and what pain points emerged?",
-                criteria: "Understanding alternative technologies and failure modes."
-              },
-              {
-                stage: "Scale & Bottlenecks",
-                title: "Handling High-Throughput & Partitions",
-                description: "Explain how your system sustained high loads or network partitions. Where was the primary bottleneck and how did you diagnose it?",
-                criteria: "Telemetry, caching layers, idempotency."
-              },
-              {
-                stage: "Behavioral STAR Question",
-                title: "Aligning Product & Engineering Priorities",
-                description: "Share a time when product requirements clashed with technical debt or scalability. How did you negotiate scope?",
-                criteria: "STAR format, executive communication, consensus building."
-              },
-              {
-                stage: "Architectural Retrospective",
-                title: "What Would You Rebuild Differently?",
-                description: "Looking back at the flagship project on your resume, if you had unlimited resources and modern tooling today, what would you re-architect?",
-                criteria: "Technical maturity, architectural foresight."
-              }
-            ]
-          };
-          setResumeParsed(fallback);
-          setResumeQuestions(fallback.tailoredQuestions);
-          setUseResumeQuestions(true);
-          setSessionStage(0);
-          setActiveQuestion(fallback.tailoredQuestions[0]);
+        } catch (error) {
+          console.error("Resume analysis failed:", error);
+          setResumeNotice({ type: "warning", text: "Could not analyze this resume. Check the text and try again." });
         } finally {
           setIsAnalyzingResume(false);
         }
@@ -925,7 +1306,7 @@ Return ONLY a JSON response:
       // Stop speech on view change
       useEffect(() => {
         stopTTS();
-        if (isRecording) {
+        if (isRecording || isStartingSpeechRef.current) {
           stopAudioRecording();
         }
       }, [currentView, sessionStage]);
@@ -944,22 +1325,82 @@ Return ONLY a JSON response:
 
       // Webcam activation
       useEffect(() => {
+        let cancelled = false;
         let stream = null;
-        if (cameraActive && currentView === "simulator") {
-          navigator.mediaDevices?.getUserMedia({ video: true, audio: false })
-            .then(s => {
-              stream = s;
-              if (videoRef.current) {
-                videoRef.current.srcObject = s;
-              }
-            })
-            .catch(err => {
-              console.warn("Camera preview permission not granted or unavailable", err);
-            });
+
+        if (!cameraActive || currentView !== "simulator") {
+          setCameraNotice(null);
+          return () => {
+            cancelled = true;
+          };
         }
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setCameraNotice({
+            type: "warning",
+            text: "Camera access requires HTTPS or localhost. Open this app from a secure connection."
+          });
+          return () => {
+            cancelled = true;
+          };
+        }
+
+        setCameraNotice({ type: "info", text: "Opening camera..." });
+        navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+          audio: false
+        }).then(async cameraStream => {
+          if (cancelled) {
+            cameraStream.getTracks().forEach(track => track.stop());
+            return;
+          }
+
+          stream = cameraStream;
+          if (!videoRef.current) {
+            throw new Error("Camera preview element is unavailable");
+          }
+
+          videoRef.current.srcObject = cameraStream;
+          const playPromise = videoRef.current.play();
+          if (playPromise) {
+            playPromise.catch(error => {
+              if (cancelled) return;
+              console.error("Camera preview playback failed:", error);
+              setCameraNotice({
+                type: "warning",
+                text: "The camera connected, but the preview could not play. Check browser permissions and try again."
+              });
+            });
+          }
+          setCameraNotice(null);
+        }).catch(error => {
+          if (stream) {
+            if (videoRef.current?.srcObject === stream) {
+              videoRef.current.srcObject = null;
+            }
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
+          }
+          if (cancelled) return;
+
+          console.error("Camera preview failed:", error);
+          const message = error.name === "NotAllowedError" || error.name === "SecurityError"
+            ? "Camera permission was denied or blocked. Allow camera access in your browser and try again."
+            : error.name === "NotFoundError" || error.name === "DevicesNotFoundError"
+              ? "No camera was found. Connect a camera and try again."
+              : error.name === "NotReadableError" || error.name === "TrackStartError"
+                ? "The camera is already in use by another app. Close it there and try again."
+                : "The camera could not be opened. Check your camera connection and browser permissions.";
+          setCameraNotice({ type: "warning", text: message });
+        });
+
         return () => {
+          cancelled = true;
           if (stream) {
             stream.getTracks().forEach(track => track.stop());
+          }
+          if (videoRef.current?.srcObject === stream) {
+            videoRef.current.srcObject = null;
           }
         };
       }, [cameraActive, currentView]);
@@ -975,130 +1416,204 @@ Return ONLY a JSON response:
         };
       }, []);
 
-      // --- GUARANTEED STT PIPELINE ---
+      // --- ON-DEVICE SPEECH-TO-TEXT ---
+      const getLocalSpeechPipeline = () => {
+        if (speechPipelineRef.current) return Promise.resolve(speechPipelineRef.current);
+        if (speechPipelinePromiseRef.current) return speechPipelinePromiseRef.current;
+
+        speechPipelinePromiseRef.current = import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2")
+          .then(({ pipeline, env }) => {
+            env.allowLocalModels = false;
+            env.useBrowserCache = true;
+            return pipeline(
+              "automatic-speech-recognition",
+              "onnx-community/whisper-tiny.en",
+              {
+                dtype: "q8",
+                device: "wasm",
+                progress_callback: (progress) => {
+                  if (progress.status === "progress" && Number.isFinite(progress.progress)) {
+                    setSpeechNotice({
+                      type: "info",
+                      text: `Downloading local speech model: ${Math.round(progress.progress)}% (first use only)`
+                    });
+                  }
+                }
+              }
+            );
+          })
+          .then(transcriber => {
+            speechPipelineRef.current = transcriber;
+            return transcriber;
+          })
+          .catch(error => {
+            speechPipelinePromiseRef.current = null;
+            throw error;
+          });
+
+        return speechPipelinePromiseRef.current;
+      };
+
+      const transcribeSpeechChunk = (samples, sampleRate, sessionId) => {
+        if (samples.length < sampleRate * 0.75) return;
+        const audio = resampleAudio(samples, sampleRate);
+        let energy = 0;
+        for (const sample of audio) energy += sample * sample;
+        if (Math.sqrt(energy / audio.length) < 0.004) return;
+
+        speechQueueRef.current = speechQueueRef.current.then(async () => {
+          if (sessionId !== speechSessionRef.current) return;
+          setSpeechNotice({ type: "info", text: "Transcribing audio locally..." });
+          const result = await speechPipelineRef.current(audio);
+          if (sessionId !== speechSessionRef.current) return;
+
+          const transcript = result.text?.trim();
+          if (transcript) {
+            finalTranscriptRef.current = mergeTranscriptText(finalTranscriptRef.current, transcript);
+            const response = [baseResponseRef.current, finalTranscriptRef.current].filter(Boolean).join(" ");
+            setUserResponse(response);
+          }
+
+          setSpeechNotice({
+            type: isListeningRef.current ? "info" : "success",
+            text: isListeningRef.current ? "Listening and transcribing on this device." : "Transcription complete."
+          });
+        }).catch(error => {
+          if (sessionId !== speechSessionRef.current) return;
+          console.error("Local speech transcription failed:", error);
+          stopAudioRecording();
+          setSpeechNotice({
+            type: "warning",
+            text: "Local transcription failed. Check that the speech model downloaded correctly, then try again."
+          });
+        });
+      };
+
+      const collectSpeechSamples = (samples, sampleRate, sessionId) => {
+        speechAudioChunksRef.current.push(samples);
+        speechAudioLengthRef.current += samples.length;
+        if (speechAudioLengthRef.current < sampleRate * 12) return;
+
+        const audio = new Float32Array(speechAudioLengthRef.current);
+        let offset = 0;
+        for (const chunk of speechAudioChunksRef.current) {
+          audio.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        const overlapLength = Math.min(Math.floor(sampleRate), audio.length);
+        const overlap = audio.slice(audio.length - overlapLength);
+        speechAudioChunksRef.current = [overlap];
+        speechAudioLengthRef.current = overlap.length;
+        transcribeSpeechChunk(audio, sampleRate, sessionId);
+      };
+
       const startAudioRecording = async () => {
+        if (isListeningRef.current || isPreparingSpeech) return;
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setSpeechNotice({
+            type: "warning",
+            text: "Microphone access requires HTTPS or localhost. Open this app from a secure connection."
+          });
+          return;
+        }
+
+        const sessionId = speechSessionRef.current + 1;
+        speechSessionRef.current = sessionId;
+        isStartingSpeechRef.current = true;
+        setIsPreparingSpeech(true);
+        setSpeechNotice({
+          type: "info",
+          text: "Preparing local speech recognition. The ~40 MB model downloads once; your audio stays on this device."
+        });
+        baseResponseRef.current = userResponse.trim();
+        finalTranscriptRef.current = "";
+        speechAudioChunksRef.current = [];
+        speechAudioLengthRef.current = 0;
         stopTTS();
-        setSpeechNotice(null);
-        baseResponseRef.current = userResponse ? userResponse.trim() + " " : "";
 
         try {
+          await getLocalSpeechPipeline();
+          if (sessionId !== speechSessionRef.current) return;
+
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
           });
+          if (sessionId !== speechSessionRef.current) {
+            stream.getTracks().forEach(track => track.stop());
+            return;
+          }
           audioStreamRef.current = stream;
 
-          // Frequency meter
-          try {
-            const AudioCtx = window.AudioContext || window.webkitAudioContext;
-            const ctx = new AudioCtx();
-            audioContextRef.current = ctx;
-            const source = ctx.createMediaStreamSource(stream);
-            const analyser = ctx.createAnalyser();
-            analyser.fftSize = 64;
-            analyser.smoothingTimeConstant = 0.6;
-            source.connect(analyser);
-            analyserRef.current = analyser;
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (!AudioCtx) throw new Error("Web Audio is not supported");
+          const ctx = new AudioCtx();
+          audioContextRef.current = ctx;
+          await ctx.resume();
 
-            const updateVisualizer = () => {
-              if (!analyserRef.current) return;
-              const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-              analyserRef.current.getByteFrequencyData(dataArray);
-              let sum = 0;
-              for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i];
-              }
-              const average = sum / dataArray.length;
-              const levelPct = Math.min(100, Math.round((average / 128) * 100));
-              setAudioLevel(levelPct);
-              animFrameRef.current = requestAnimationFrame(updateVisualizer);
-            };
-            updateVisualizer();
-          } catch (e) {
-            console.warn("Audio meter setup skipped", e);
-          }
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 64;
+          analyser.smoothingTimeConstant = 0.6;
+          source.connect(analyser);
+          analyserRef.current = analyser;
 
-          // MediaRecorder for fallback
-          audioChunksRef.current = [];
-          const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
-          let selectedMime = '';
-          for (const m of mimeTypes) {
-            if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) {
-              selectedMime = m;
-              break;
-            }
-          }
-
-          const recorder = new MediaRecorder(stream, selectedMime ? { mimeType: selectedMime } : {});
-          recorder.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+          const processor = ctx.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = event => {
+            const output = event.outputBuffer.getChannelData(0);
+            output.fill(0);
+            if (!isListeningRef.current || sessionId !== speechSessionRef.current) return;
+            collectSpeechSamples(
+              new Float32Array(event.inputBuffer.getChannelData(0)),
+              ctx.sampleRate,
+              sessionId
+            );
           };
-          recorder.start(500);
-          mediaRecorderRef.current = recorder;
+          source.connect(processor);
+          processor.connect(ctx.destination);
+          speechProcessorRef.current = processor;
 
-          startWebSpeechStreaming();
+          const updateVisualizer = () => {
+            if (!analyserRef.current) return;
+            const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+            analyserRef.current.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+            setAudioLevel(Math.min(100, Math.round((sum / dataArray.length / 128) * 100)));
+            animFrameRef.current = requestAnimationFrame(updateVisualizer);
+          };
+          updateVisualizer();
 
+          isStartingSpeechRef.current = false;
           isListeningRef.current = true;
+          setIsPreparingSpeech(false);
           setIsRecording(true);
           setIsTimerRunning(true);
-        } catch (err) {
-          console.error("Mic access failed:", err);
-          setSpeechNotice({
-            type: "warning",
-            text: "Microphone permission denied or unavailable. You can type your answer directly into the response box."
-          });
-          setIsRecording(false);
+          setSpeechNotice({ type: "info", text: "Listening and transcribing on this device." });
+        } catch (error) {
+          console.error("Local speech setup failed:", error);
+          stopAudioRecording();
+          const message = error.name === "NotAllowedError" || error.name === "SecurityError"
+            ? "Microphone permission was denied. Allow microphone access and try again."
+            : error.name === "NotFoundError" || error.name === "DevicesNotFoundError"
+              ? "No microphone was found. Connect a microphone and try again."
+              : "Could not start local speech recognition. Check your connection for the first model download and try again.";
+          setSpeechNotice({ type: "warning", text: message });
+        } finally {
+          if (sessionId === speechSessionRef.current) {
+            isStartingSpeechRef.current = false;
+            setIsPreparingSpeech(false);
+          }
         }
       };
 
-      const startWebSpeechStreaming = () => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) return;
-
-        try {
-          const rec = new SpeechRecognition();
-          rec.continuous = true;
-          rec.interimResults = true;
-          rec.lang = "en-US";
-
-          rec.onresult = (event) => {
-            let interimTranscript = "";
-            let finalTranscript = "";
-
-            for (let i = 0; i < event.results.length; i++) {
-              const res = event.results[i];
-              if (res.isFinal) {
-                finalTranscript += res[0].transcript + " ";
-              } else {
-                interimTranscript += res[0].transcript;
-              }
-            }
-
-            const currentSpoken = (finalTranscript + interimTranscript).trim();
-            if (currentSpoken) {
-              const combined = (baseResponseRef.current + currentSpoken).trimStart();
-              setUserResponse(combined);
-            }
-          };
-
-          rec.onerror = (e) => {
-            if (e.error !== "no-speech") console.warn("Web Speech note:", e.error);
-          };
-
-          rec.onend = () => {
-            if (isListeningRef.current) {
-              try { rec.start(); } catch (_) {}
-            }
-          };
-
-          rec.start();
-          recognitionRef.current = rec;
-        } catch (e) {
-          console.warn("WebSpeech init note:", e);
+      const stopAudioRecording = () => {
+        if (isStartingSpeechRef.current) {
+          speechSessionRef.current += 1;
+          isStartingSpeechRef.current = false;
         }
-      };
-
-      const stopAudioRecording = async () => {
         isListeningRef.current = false;
+        setIsPreparingSpeech(false);
         setIsRecording(false);
         setAudioLevel(0);
 
@@ -1107,84 +1622,40 @@ Return ONLY a JSON response:
           animFrameRef.current = null;
         }
 
-        if (recognitionRef.current) {
-          try { recognitionRef.current.stop(); } catch (_) {}
-          recognitionRef.current = null;
+        if (speechProcessorRef.current) {
+          speechProcessorRef.current.onaudioprocess = null;
+          speechProcessorRef.current.disconnect();
+          speechProcessorRef.current = null;
         }
+
+        const ctx = audioContextRef.current;
+        const hasPendingAudio = ctx && speechAudioLengthRef.current > ctx.sampleRate * 1.5;
+        if (hasPendingAudio) {
+          const pendingAudio = new Float32Array(speechAudioLengthRef.current);
+          let offset = 0;
+          for (const chunk of speechAudioChunksRef.current) {
+            pendingAudio.set(chunk, offset);
+            offset += chunk.length;
+          }
+          transcribeSpeechChunk(pendingAudio, ctx.sampleRate, speechSessionRef.current);
+        }
+        speechAudioChunksRef.current = [];
+        speechAudioLengthRef.current = 0;
 
         if (audioStreamRef.current) {
           audioStreamRef.current.getTracks().forEach(track => track.stop());
           audioStreamRef.current = null;
         }
 
-        const recorder = mediaRecorderRef.current;
-        if (recorder && recorder.state !== 'inactive') {
-          recorder.onstop = async () => {
-            const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-            const currentWords = userResponse.trim().split(/\s+/).filter(Boolean);
-            if (audioBlob.size > 15000 && currentWords.length < 3) {
-              await transcribeAudioWithGemini(audioBlob);
-            }
-          };
-          try { recorder.stop(); } catch (_) {}
-        }
-      };
-
-      const transcribeAudioWithGemini = async (audioBlob) => {
-        setIsTranscribingWithAI(true);
-        setSpeechNotice({
-          type: "info",
-          text: "Transcribing your audio using AI speech engine..."
-        });
-
-        try {
-          const base64Audio = await blobToBase64(audioBlob);
-          const mime = audioBlob.type || 'audio/webm';
-          const prompt = "Please transcribe this spoken audio into accurate, clean text verbatim. Return only the exact transcribed speech.";
-
-          const payload = {
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  { text: prompt },
-                  {
-                    inlineData: {
-                      mimeType: mime.includes('mp4') ? 'audio/mp4' : mime.includes('ogg') ? 'audio/ogg' : 'audio/webm',
-                      data: base64Audio
-                    }
-                  }
-                ]
-              }
-            ]
-          };
-
-          const apiKey = "";
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-
-          const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+        analyserRef.current = null;
+        if (ctx && ctx.state !== "closed") {
+          ctx.close().catch(error => {
+            console.warn("Audio context cleanup failed:", error);
           });
-
-          if (response.ok) {
-            const result = await response.json();
-            const transcribed = result?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (transcribed) {
-              const fullText = (baseResponseRef.current + transcribed).trim();
-              setUserResponse(fullText);
-              setSpeechNotice({
-                type: "success",
-                text: "Audio transcription completed successfully!"
-              });
-              setTimeout(() => setSpeechNotice(null), 3500);
-            }
-          }
-        } catch (err) {
-          console.warn("AI Audio Transcription note:", err);
-        } finally {
-          setIsTranscribingWithAI(false);
+        }
+        audioContextRef.current = null;
+        if (!hasPendingAudio) {
+          setSpeechNotice({ type: "info", text: "Microphone stopped." });
         }
       };
 
@@ -1348,8 +1819,8 @@ Return ONLY a JSON response:
           },
           {
             stage: "Core Technical Scenario",
-            title: `Technical Deep-Dive: Architecture for ${focusArea}`,
-            description: `Walk me through your architectural choices when building a mission-critical subsystem for ${focusArea} at high throughput and fault tolerance.`,
+            title: `Core Technical Scenario: Trade-offs in ${focusArea}`,
+            description: `Compare two viable architectural approaches for ${focusArea}. Explain your choice, constraints, likely bottlenecks, and how you would validate reliability at scale.`,
             criteria: "Clarity on tradeoffs, bottlenecks, CAP theorem, reliability."
           },
           {
@@ -1382,103 +1853,22 @@ Return ONLY a JSON response:
         }
       };
 
-      // --- GEMINI SCORECARD EVALUATION ---
-      const handleEvaluateResponse = async () => {
+      // Score each response against its question locally so failures cannot produce fabricated feedback.
+      const handleEvaluateResponse = () => {
         if (!userResponse.trim()) return;
         setIsAIEvaluating(true);
         stopTTS();
         if (isRecording) stopAudioRecording();
         setIsTimerRunning(false);
-
-        const prompt = `You are a Principal Engineering Interview Bar Raiser at a top tier tech company evaluating a candidate.
-Candidate Role: ${level} ${role}
-Question Asked: "${activeQuestion?.title} - ${activeQuestion?.description}"
-Evaluation Target: ${activeQuestion?.criteria}
-Candidate's Answer:
-"${userResponse}"
-
-Evaluate this answer and return ONLY valid JSON matching this schema:
-{
-  "overallScore": number (0-100),
-  "hiringRecommendation": "Strong Hire" | "Hire" | "Lean Hire" | "Do Not Hire",
-  "technicalScore": number (0-100),
-  "structureScore": number (0-100),
-  "deliveryScore": number (0-100),
-  "summary": "1-2 sentence executive assessment of the answer.",
-  "strengths": ["bullet point 1", "bullet point 2"],
-  "improvements": ["concrete constructive recommendation 1", "concrete recommendation 2"],
-  "modelAnswer": "A concise masterclass model answer demonstrating senior-level depth, STAR framing, and trade-off articulation.",
-  "fillerWordCount": number
-}`;
-
-        try {
-          const apiKey = "";
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-          const response = await fetch(apiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: "application/json" }
-            })
-          });
-
-          const data = await response.json();
-          const parsed = JSON.parse(data.candidates[0].content.parts[0].text);
-          setLatestFeedback(parsed);
-          
-          const newSessionRecord = {
-            id: `sess-${Date.now()}`,
-            date: "Just now",
-            role: `${level} ${role}`,
-            score: parsed.overallScore,
-            scores: {
-              technical: parsed.technicalScore,
-              structure: parsed.structureScore,
-              communication: parsed.deliveryScore
-            },
-            duration: `${Math.floor((180 - timerSeconds) / 60)}m ${(180 - timerSeconds) % 60}s`,
-            status: parsed.hiringRecommendation
-          };
-          setSavedSessions(prev => [newSessionRecord, ...prev]);
-
-          setTranscriptHistory(prev => [
-            ...prev,
-            { question: activeQuestion.title, answer: userResponse, feedback: parsed }
-          ]);
-
-          setCurrentView("report");
-        } catch (error) {
-          console.warn("AI generation fallback:", error);
-          const wordCount = userResponse.trim().split(/\s+/).length;
-          const fillerMatches = (userResponse.match(/\b(um|uh|like|you know|basically|actually)\b/gi) || []).length;
-          const techScore = Math.min(94, Math.max(65, Math.floor(wordCount * 0.45) + 40));
-          const structScore = userResponse.toLowerCase().includes("result") || userResponse.toLowerCase().includes("tradeoff") ? 88 : 75;
-          const overall = Math.round((techScore * 0.5) + (structScore * 0.3) + (78 * 0.2));
-
-          const fallbackEval = {
-            overallScore: overall,
-            hiringRecommendation: overall >= 85 ? "Strong Hire" : overall >= 75 ? "Hire" : "Lean Hire",
-            technicalScore: techScore,
-            structureScore: structScore,
-            deliveryScore: 84,
-            summary: `Candidate demonstrated solid foundational understanding of ${role} principles with clear problem-solving structure.`,
-            strengths: [
-              "Identified core components and system objectives directly without unnecessary delay.",
-              "Maintained logical flow and acknowledged real-world constraints."
-            ],
-            improvements: [
-              "Quantify technical metrics (e.g., target p99 latency, RPS bounds, SLA numbers).",
-              "Articulate failure blast-radii and edge cases earlier in the response."
-            ],
-            modelAnswer: `In an optimal setup for ${focusArea}, I would partition the ingress layer with horizontal stateless worker pools fronted by an Envoy mesh. State persistence would be decoupled using distributed Raft consensus with asynchronous read-replicas, guaranteeing sub-15ms p99 response times while isolating failures via exponential backoff circuit breakers.`,
-            fillerWordCount: fillerMatches
-          };
-          setLatestFeedback(fallbackEval);
-          setCurrentView("report");
-        } finally {
-          setIsAIEvaluating(false);
-        }
+        const feedback = evaluateAnswerLocally(activeQuestion, userResponse, role, selectedTrack);
+        setLatestFeedback(feedback);
+        setIsFinalReview(false);
+        setTranscriptHistory(prev => [
+          ...prev.filter(item => item.stage !== sessionStage),
+          { stage: sessionStage, question: activeQuestion.title, answer: userResponse, feedback, durationSeconds: 180 - timerSeconds }
+        ].sort((a, b) => a.stage - b.stage));
+        setCurrentView("report");
+        setIsAIEvaluating(false);
       };
 
       const formatTime = (secs) => {
@@ -1628,7 +2018,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       </div>
                     </div>
 
-                    {/* Card 3: LLM coach */}
+                    {/* Card 3: Answer evaluation */}
                     <div 
                       onClick={() => startMockInterviewWithTrack("Technical")}
                       className="p-7 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800/90 shadow-sm hover:shadow-md hover:border-blue-400 dark:hover:border-blue-500 transition-all cursor-pointer group flex flex-col justify-between space-y-4"
@@ -1638,10 +2028,10 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                           <Icon name="sparkles" className="w-5 h-5" />
                         </div>
                         <h3 className="font-editorial text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-                          LLM coach
+                          Answer evaluation
                         </h3>
                         <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed font-normal">
-                          Per-answer scoring with strengths, improvements, and a session summary.
+                          Question-specific rubric scores with evidence-based strengths and improvements.
                         </p>
                       </div>
                       <div className="text-xs font-semibold text-violet-600 dark:text-violet-400 flex items-center gap-1 pt-1">
@@ -1831,16 +2221,29 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                           <span>Upload File</span>
                           <input 
                             type="file" 
-                            accept=".txt,.md,.pdf,.doc,.docx" 
+                            accept=".txt,.md,.pdf,.docx" 
                             onChange={handleFileUpload}
                             className="hidden" 
                           />
                         </label>
                       </div>
 
+                      {resumeFileName && (
+                        <div className="text-[11px] text-blue-600 dark:text-blue-400 truncate" title={resumeFileName}>
+                          Uploaded: {resumeFileName}
+                        </div>
+                      )}
+
                       <textarea
                         value={resumeText}
-                        onChange={(e) => setResumeText(e.target.value)}
+                        onChange={(e) => {
+                          setResumeText(e.target.value);
+                          setResumeFileName("");
+                          setResumeNotice(null);
+                          setResumeParsed(null);
+                          setResumeQuestions([]);
+                          setUseResumeQuestions(false);
+                        }}
                         placeholder="Paste resume experience bullets, tech stack, and achievements here..."
                         rows={7}
                         className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 text-xs font-mono text-slate-800 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 leading-relaxed resize-y"
@@ -1856,13 +2259,35 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
 
                       <textarea
                         value={jobDescription}
-                        onChange={(e) => setJobDescription(e.target.value)}
+                        onChange={(e) => {
+                          setJobDescription(e.target.value);
+                          setResumeNotice(null);
+                          setResumeParsed(null);
+                          setResumeQuestions([]);
+                          setUseResumeQuestions(false);
+                        }}
                         placeholder="Paste the job posting / JD requirements here to calculate keyword match & gaps against this specific company role..."
                         rows={7}
                         className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 text-xs font-mono text-slate-800 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 leading-relaxed resize-y"
                       />
                     </div>
                   </div>
+
+                  {resumeNotice && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className={`rounded-xl border px-3 py-2 text-xs ${
+                        resumeNotice.type === "warning"
+                          ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                          : resumeNotice.type === "success"
+                            ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                            : "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300"
+                      }`}
+                    >
+                      {resumeNotice.text}
+                    </div>
+                  )}
 
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
                     <div className="text-xs text-slate-500 dark:text-slate-400">
@@ -1874,14 +2299,14 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                     </div>
 
                     <button
-                      onClick={analyzeResumeWithGemini}
+                      onClick={analyzeResume}
                       disabled={isAnalyzingResume || !resumeText.trim()}
                       className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-sm shadow-blue-500/30 disabled:opacity-50 transition-all active:scale-95"
                     >
                       {isAnalyzingResume ? (
                         <>
                           <Icon name="loader" className="w-4 h-4 animate-spin text-white" />
-                          <span>Scanning with Gemini ATS Engine...</span>
+                          <span>Analyzing Resume...</span>
                         </>
                       ) : (
                         <>
@@ -1902,6 +2327,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                         <span className="text-xs font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">Candidate ATS Report</span>
                         <h3 className="text-xl font-bold text-slate-900 dark:text-white mt-1">{resumeParsed.candidateName || "Candidate Profile"}</h3>
                         <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">Identified Track: <strong className="text-slate-800 dark:text-slate-200">{resumeParsed.detectedRole || role}</strong></p>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">{resumeParsed.analysisNote}</p>
                         
                         <div className="flex flex-wrap gap-2 mt-3">
                           {resumeParsed.topSkills?.map((skill, i) => (
@@ -1915,13 +2341,14 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       {/* Overall ATS Score */}
                       <div className="flex items-center gap-4 shrink-0">
                         <div className="h-24 w-24 rounded-2xl bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-900 shadow-sm flex flex-col items-center justify-center">
-                          <span className="text-3xl font-extrabold text-blue-600 dark:text-blue-400 font-mono">{resumeParsed.atsScore || 84}</span>
+                          <span className="text-3xl font-extrabold text-blue-600 dark:text-blue-400 font-mono">{resumeParsed.atsScore}</span>
                           <span className="text-[10px] uppercase font-bold text-slate-400">ATS Score</span>
                         </div>
                         <button
                           onClick={() => {
                             setUseResumeQuestions(true);
                             setSessionStage(0);
+                            resetInterviewReview();
                             setActiveQuestion(resumeQuestions[0]);
                             setCurrentView("simulator");
                           }}
@@ -1938,41 +2365,70 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
                         <div className="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-400">
                           <span>Keyword Density</span>
-                          <span className="font-mono text-blue-600 dark:text-blue-400">{resumeParsed.atsBreakdown?.keywordMatch || 85}%</span>
+                          <span className="font-mono text-blue-600 dark:text-blue-400">{resumeParsed.atsBreakdown?.keywordMatch ?? 0}%</span>
                         </div>
                         <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div className="bg-blue-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.keywordMatch || 85}%` }}></div>
+                          <div className="bg-blue-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.keywordMatch ?? 0}%` }}></div>
                         </div>
                       </div>
 
                       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
                         <div className="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-400">
                           <span>Quantifiable Impact</span>
-                          <span className="font-mono text-indigo-600 dark:text-indigo-400">{resumeParsed.atsBreakdown?.quantifiableImpact || 78}%</span>
+                          <span className="font-mono text-indigo-600 dark:text-indigo-400">{resumeParsed.atsBreakdown?.quantifiableImpact ?? 0}%</span>
                         </div>
                         <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div className="bg-indigo-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.quantifiableImpact || 78}%` }}></div>
+                          <div className="bg-indigo-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.quantifiableImpact ?? 0}%` }}></div>
                         </div>
                       </div>
 
                       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
                         <div className="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-400">
                           <span>Formatting & Flow</span>
-                          <span className="font-mono text-emerald-600 dark:text-emerald-400">{resumeParsed.atsBreakdown?.readability || 90}%</span>
+                          <span className="font-mono text-emerald-600 dark:text-emerald-400">{resumeParsed.atsBreakdown?.readability ?? 0}%</span>
                         </div>
                         <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div className="bg-emerald-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.readability || 90}%` }}></div>
+                          <div className="bg-emerald-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.readability ?? 0}%` }}></div>
                         </div>
                       </div>
 
                       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
                         <div className="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-400">
                           <span>Action Verbs</span>
-                          <span className="font-mono text-amber-600 dark:text-amber-400">{resumeParsed.atsBreakdown?.bulletQuality || 82}%</span>
+                          <span className="font-mono text-amber-600 dark:text-amber-400">{resumeParsed.atsBreakdown?.bulletQuality ?? 0}%</span>
                         </div>
                         <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div className="bg-amber-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.bulletQuality || 82}%` }}></div>
+                          <div className="bg-amber-500 h-full rounded-full" style={{ width: `${resumeParsed.atsBreakdown?.bulletQuality ?? 0}%` }}></div>
                         </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                        <h4 className="font-bold text-sm text-slate-900 dark:text-white">Keywords to address</h4>
+                        {resumeParsed.missingKeywords?.length ? (
+                          <div className="flex flex-wrap gap-2">
+                            {resumeParsed.missingKeywords.map((keyword, index) => (
+                              <span key={index} className="px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-300">{keyword}</span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-500 dark:text-slate-400">No notable keyword gaps were detected.</p>
+                        )}
+                        {resumeParsed.projectsFound?.length > 0 && (
+                          <>
+                            <h4 className="font-bold text-sm text-slate-900 dark:text-white pt-2">Experience found in your resume</h4>
+                            <ul className="space-y-2 text-xs text-slate-600 dark:text-slate-400">
+                              {resumeParsed.projectsFound.map((project, index) => <li key={index}>• {project}</li>)}
+                            </ul>
+                          </>
+                        )}
+                      </div>
+                      <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                        <h4 className="font-bold text-sm text-slate-900 dark:text-white">Recommended improvements</h4>
+                        <ul className="space-y-2 text-xs text-slate-600 dark:text-slate-400">
+                          {resumeParsed.atsRecommendations?.map((recommendation, index) => <li key={index}>• {recommendation}</li>)}
+                        </ul>
                       </div>
                     </div>
 
@@ -2000,6 +2456,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                               onClick={() => {
                                 setUseResumeQuestions(true);
                                 setSessionStage(idx);
+                                resetInterviewReview();
                                 setActiveQuestion(q);
                                 setCurrentView("simulator");
                               }}
@@ -2029,12 +2486,14 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                     4-Week Personalized Interview Preparation Roadmap
                   </h2>
                   <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-                    Carefully calibrated study schedule targeting distributed system depth, trade-off articulation, and behavioral leadership.
+                    {resumeParsed
+                      ? "A study plan tailored to your resume, target role, and ATS analysis."
+                      : "Carefully calibrated study schedule targeting distributed system depth, trade-off articulation, and behavioral leadership."}
                   </p>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {[
+                  {(resumeParsed?.roadmap?.length ? resumeParsed.roadmap : [
                     {
                       week: "Week 1",
                       title: "Distributed Architectures & High-Throughput Ingestion",
@@ -2067,7 +2526,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       status: "Upcoming",
                       color: "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
                     }
-                  ].map((w, i) => (
+                  ]).map((w, i) => (
                     <div key={i} className={`p-6 rounded-2xl border ${w.color} shadow-sm space-y-4`}>
                       <div className="flex items-center justify-between">
                         <span className="font-mono text-xs font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider">{w.week}</span>
@@ -2095,14 +2554,27 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
 
                 <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div>
-                    <h4 className="font-bold text-sm text-slate-900 dark:text-white">Ready to test Week 2 competencies?</h4>
-                    <p className="text-xs text-slate-500">Run a simulated rate-limiting & caching scenario with real-time feedback.</p>
+                    <h4 className="font-bold text-sm text-slate-900 dark:text-white">
+                      {resumeParsed ? "Ready to practice your tailored questions?" : "Ready to test Week 2 competencies?"}
+                    </h4>
+                    <p className="text-xs text-slate-500">
+                      {resumeParsed ? "Use the interview questions generated from your resume analysis." : "Run a simulated rate-limiting & caching scenario with real-time feedback."}
+                    </p>
                   </div>
                   <button
-                    onClick={() => setCurrentView("simulator")}
+                    onClick={() => {
+                      resetInterviewReview();
+                      setSessionStage(0);
+                      if (resumeParsed && resumeQuestions.length) {
+                        setUseResumeQuestions(true);
+                        setSessionStage(0);
+                        setActiveQuestion(resumeQuestions[0]);
+                      }
+                      setCurrentView("simulator");
+                    }}
                     className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-md shadow-blue-500/25 flex items-center gap-1.5"
                   >
-                    <span>Launch Scenario Simulation</span>
+                    <span>{resumeParsed ? "Practice Tailored Questions" : "Launch Scenario Simulation"}</span>
                     <Icon name="arrow-right" className="w-3.5 h-3.5" />
                   </button>
                 </div>
@@ -2308,13 +2780,29 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       )}
                     </div>
 
+                    {cameraActive && cameraNotice && (
+                      <div
+                        role="status"
+                        aria-live="polite"
+                        className={`absolute inset-x-4 top-1/2 z-10 -translate-y-1/2 rounded-xl border px-3 py-2 text-center text-xs ${
+                          cameraNotice.type === "warning"
+                            ? "border-amber-400/60 bg-black/80 text-amber-200"
+                            : "border-white/20 bg-black/70 text-white"
+                        }`}
+                      >
+                        {cameraNotice.text}
+                      </div>
+                    )}
+
                     {/* Candidate Bottom Controls */}
                     <div className="relative z-10 p-3.5 bg-gradient-to-t from-black/90 via-black/50 to-transparent flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <button 
-                          onClick={() => setCameraActive(!cameraActive)}
+                          onClick={() => setCameraActive(active => !active)}
+                          aria-label={cameraActive ? "Turn camera off" : "Turn camera on"}
+                          aria-pressed={cameraActive}
                           className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-white transition-all text-xs"
-                          title="Toggle Camera"
+                          title={cameraActive ? "Turn camera off" : "Turn camera on"}
                         >
                           <Icon name={cameraActive ? "video" : "video-off"} className="w-4 h-4" />
                         </button>
@@ -2322,14 +2810,18 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                         {/* Live STT Toggle */}
                         <button 
                           onClick={toggleSpeechToText}
+                          aria-pressed={isRecording}
+                          disabled={isPreparingSpeech}
                           className={`px-4 py-2 rounded-xl flex items-center gap-2 text-xs font-semibold transition-all shadow-md ${
-                            isRecording 
+                            isPreparingSpeech
+                              ? 'bg-blue-600/70 text-white cursor-wait'
+                              : isRecording 
                               ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-600/30 animate-pulse' 
                               : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/25'
                           }`}
                         >
-                          <Icon name={isRecording ? "square" : "mic"} className="w-4 h-4" />
-                          <span>{isRecording ? "Stop Recording" : "Start Mic (STT)"}</span>
+                          <Icon name={isPreparingSpeech ? "loader" : isRecording ? "square" : "mic"} className={`w-4 h-4 ${isPreparingSpeech ? "animate-spin" : ""}`} />
+                          <span>{isPreparingSpeech ? "Loading Local STT..." : isRecording ? "Stop Recording" : "Start Mic (STT)"}</span>
                         </button>
                       </div>
 
@@ -2349,7 +2841,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                         </div>
                       ) : (
                         <div className="text-[11px] text-slate-300 font-mono bg-black/40 px-2.5 py-1 rounded-lg">
-                          Web Audio Ready
+                          On-device speech recognition
                         </div>
                       )}
                     </div>
@@ -2445,6 +2937,20 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                     />
                   </div>
 
+                  {speechNotice && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className={`rounded-xl border px-3 py-2 text-xs ${
+                        speechNotice.type === "warning"
+                          ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                          : "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300"
+                      }`}
+                    >
+                      {speechNotice.text}
+                    </div>
+                  )}
+
                   {/* Footer Action Row */}
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2">
                     <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
@@ -2478,7 +2984,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                         {isAIEvaluating ? (
                           <>
                             <Icon name="loader" className="w-4 h-4 animate-spin text-white" />
-                            <span>Scoring Answer with Gemini...</span>
+                            <span>Scoring Against Interview Rubric...</span>
                           </>
                         ) : (
                           <>
@@ -2514,8 +3020,13 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       </span>
                       <span className="text-xs text-slate-500">{level} {role} Standard</span>
                     </div>
-                    <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">Executive Evaluation Scorecard</h2>
+                    <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+                      {isFinalReview ? "Final Interview Review" : "Answer Evaluation"}
+                    </h2>
                     <p className="text-sm text-slate-600 dark:text-slate-300 mt-1 max-w-xl leading-relaxed">{latestFeedback.summary}</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
+                      Scores are local rubric estimates based on answer relevance, evidence, and structure; they are not an AI-verified assessment of technical correctness.
+                    </p>
                     
                     <button
                       onClick={() => speakText(`Here is your interview assessment. Hiring recommendation: ${latestFeedback.hiringRecommendation}. Overall score: ${latestFeedback.overallScore} out of 100. Summary: ${latestFeedback.summary}`)}
@@ -2536,7 +3047,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
                     <div className="flex justify-between text-xs text-slate-500 font-semibold">
-                      <span>Technical Depth</span>
+                      <span>{selectedTrack === "Behavioral" ? "Situation & Action" : selectedTrack === "HR" ? "Role Alignment" : "Question Relevance"}</span>
                       <span className="font-mono text-blue-600 dark:text-blue-400 font-bold">{latestFeedback.technicalScore}%</span>
                     </div>
                     <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -2546,7 +3057,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
 
                   <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
                     <div className="flex justify-between text-xs text-slate-500 font-semibold">
-                      <span>STAR Framework</span>
+                      <span>Structure & Evidence</span>
                       <span className="font-mono text-indigo-600 dark:text-indigo-400 font-bold">{latestFeedback.structureScore}%</span>
                     </div>
                     <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -2556,7 +3067,7 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
 
                   <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
                     <div className="flex justify-between text-xs text-slate-500 font-semibold">
-                      <span>Delivery & Pacing</span>
+                      <span>Clarity & Concision</span>
                       <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">{latestFeedback.deliveryScore}%</span>
                     </div>
                     <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -2565,12 +3076,44 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                   </div>
                 </div>
 
-                {/* Model Answer */}
+                {isFinalReview && (
+                  <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                    <h3 className="font-bold text-sm text-slate-900 dark:text-white">Question-by-question results</h3>
+                    <div className="space-y-3">
+                      {transcriptHistory.map((item, index) => (
+                        <div key={`${index}-${item.question}`} className="rounded-xl border border-slate-200 dark:border-slate-800 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{index + 1}. {item.question}</p>
+                            <span className="shrink-0 font-mono font-bold text-blue-600 dark:text-blue-400">{item.feedback.overallScore}/100</span>
+                          </div>
+                          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{item.feedback.hiringRecommendation} · {item.feedback.summary}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                    <h3 className="font-bold text-sm text-slate-900 dark:text-white">Evidence recognized</h3>
+                    <ul className="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-300">
+                      {latestFeedback.strengths.map((strength, index) => <li key={index}>• {strength}</li>)}
+                    </ul>
+                  </div>
+                  <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                    <h3 className="font-bold text-sm text-slate-900 dark:text-white">What to improve</h3>
+                    <ul className="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-300">
+                      {latestFeedback.improvements.map((improvement, index) => <li key={index}>• {improvement}</li>)}
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Question-specific answer guidance */}
                 <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
                   <div className="flex items-center justify-between">
                     <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
                       <Icon name="book-open" className="w-4 h-4 text-blue-500" />
-                      <span>Masterclass Benchmark Answer</span>
+                      <span>What a strong answer should include</span>
                     </h3>
                     <button
                       onClick={() => speakText(latestFeedback.modelAnswer)}
@@ -2590,22 +3133,59 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                     onClick={() => setCurrentView("simulator")}
                     className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
                   >
-                    ← Back to Simulator
+                    {isFinalReview ? "← Back to Last Question" : "← Back to Simulator"}
                   </button>
 
-                  <button
-                    onClick={() => {
-                      const next = (sessionStage + 1) % 5;
-                      setSessionStage(next);
-                      loadQuestionForStage(next);
-                      setUserResponse("");
-                      setCurrentView("simulator");
-                    }}
-                    className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-md shadow-blue-500/25 flex items-center gap-1.5"
-                  >
-                    <span>Proceed to Next Round</span>
-                    <Icon name="arrow-right" className="w-3.5 h-3.5" />
-                  </button>
+                  {isFinalReview ? (
+                    <button
+                      onClick={() => startMockInterviewWithTrack(selectedTrack)}
+                      className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-md shadow-blue-500/25 flex items-center gap-1.5"
+                    >
+                      <span>Start New Interview</span>
+                      <Icon name="arrow-right" className="w-3.5 h-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        const lastStage = useResumeQuestions ? Math.min(Math.max(resumeQuestions.length, 1), 5) - 1 : 4;
+                        if (sessionStage >= lastStage) {
+                          const feedback = aggregateInterviewFeedback(transcriptHistory);
+                          setLatestFeedback(feedback);
+                          setIsFinalReview(true);
+                          const totalSeconds = transcriptHistory.reduce((total, item) => total + (item.durationSeconds || 0), 0);
+                          setSavedSessions(prev => [{
+                            id: `sess-${Date.now()}`,
+                            date: "Just now",
+                            role: `${level} ${role}`,
+                            score: feedback.overallScore,
+                            scores: {
+                              technical: feedback.technicalScore,
+                              structure: feedback.structureScore,
+                              communication: feedback.deliveryScore
+                            },
+                            duration: `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`,
+                            status: feedback.hiringRecommendation
+                          }, ...prev]);
+                          setCurrentView("report");
+                          return;
+                        }
+                        const next = sessionStage + 1;
+                        setSessionStage(next);
+                        setIsFinalReview(false);
+                        loadQuestionForStage(next);
+                        setUserResponse("");
+                        setCurrentView("simulator");
+                      }}
+                      className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-md shadow-blue-500/25 flex items-center gap-1.5"
+                    >
+                      <span>
+                        {sessionStage >= (useResumeQuestions ? Math.min(Math.max(resumeQuestions.length, 1), 5) - 1 : 4)
+                          ? "View Final Review"
+                          : "Proceed to Next Round"}
+                      </span>
+                      <Icon name="arrow-right" className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
 
               </div>
@@ -2643,6 +3223,9 @@ Evaluate this answer and return ONLY valid JSON matching this schema:
                       <div className="flex justify-end pt-1">
                         <button
                           onClick={() => {
+                            resetInterviewReview();
+                            setUseResumeQuestions(false);
+                            setSessionStage(0);
                             setActiveQuestion({
                               stage: q.category,
                               title: q.title,
